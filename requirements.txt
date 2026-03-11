@@ -1,0 +1,3 @@
+# PyPI packages installed into the Composer environment.
+# These are also declared in terraform/composer.tf → pypi_packages.
+requests>=2.31,<3

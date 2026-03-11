@@ -1,0 +1,11 @@
+# Copy this file to terraform.tfvars and fill in your values.
+#   cp terraform.tfvars.example terraform.tfvars
+
+project_id         = "my-chhs-airflow-demo"   # Must be globally unique
+billing_account_id = "XXXXXX-XXXXXX-XXXXXX"
+folder_id          = "123456789012"            # Numeric folder ID
+region             = "us-central1"
+
+# Pin to a specific Composer image version for reproducibility.
+# See: https://cloud.google.com/composer/docs/concepts/versioning/composer-versions
+# composer_image_version = "composer-3-airflow-2.10.5-build.3"
