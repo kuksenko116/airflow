@@ -4,8 +4,8 @@ CMS Revoked Medicare Providers & Suppliers — Bronze → Silver → Gold pipeli
 Source  : https://data.cms.gov/provider-characteristics/medicare-provider-supplier-enrollment/revoked-medicare-providers-and-suppliers
 API     : CMS Data API v1 (no auth required, paginated via size/offset)
 Endpoint: https://data.cms.gov/data-api/v1/dataset/a6496a7d-4e19-479a-a9ad-d4c0a49e07c3/data
-Schedule: Daily at 07:00 UTC
-Strategy: Full reload (WRITE_TRUNCATE)
+Schedule: Weekly on Monday at 06:00 UTC
+Strategy: Bronze full reload, Silver/Gold MERGE (upsert)
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ BRONZE_TABLE = f"{PROJECT_ID}.bronze.cms_revoked_medicare_providers_raw"
         "Ingest CMS Revoked Medicare Providers and Suppliers data into "
         "BigQuery (bronze → silver → gold medallion)."
     ),
-    schedule="0 7 * * *",  # daily 07:00 UTC
+    schedule="0 6 * * 1",  # every Monday 06:00 UTC
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["cms", "medicare", "providers", "revoked", "medallion"],
@@ -120,20 +120,27 @@ def cms_revoked_medicare_providers_pipeline():
 
         return f"Loaded {len(rows)} rows into {BRONZE_TABLE}"
 
-    # ── Silver ───────────────────────────────────────────────────────────
-    # Expect a templated SQL file at: sql/silver/clean_cms_revoked_providers.sql
+    # ── Silver: Init tables ──────────────────────────────────────────────
+    init_silver = BigQueryInsertJobOperator(
+        task_id="init_silver_tables",
+        configuration={
+            "query": {
+                "query": "{% include 'sql/silver/init_silver_tables.sql' %}",
+                "useLegacySql": False,
+            }
+        },
+        project_id=PROJECT_ID,
+        location=BQ_LOCATION,
+        deferrable=True,
+    )
+
+    # ── Silver: MERGE/upsert ──────────────────────────────────────────────
     silver = BigQueryInsertJobOperator(
         task_id="transform_silver",
         configuration={
             "query": {
                 "query": "{% include 'sql/silver/clean_cms_revoked_providers.sql' %}",
                 "useLegacySql": False,
-                "destinationTable": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": "silver",
-                    "tableId": "cms_revoked_medicare_providers",
-                },
-                "writeDisposition": "WRITE_TRUNCATE",
             }
         },
         project_id=PROJECT_ID,
@@ -141,20 +148,27 @@ def cms_revoked_medicare_providers_pipeline():
         deferrable=True,
     )
 
-    # ── Gold: Aggregations by geography ──────────────────────────────────
-    # Expect templated SQL at: sql/gold/revoked_providers_by_state.sql
+    # ── Gold: Init tables ─────────────────────────────────────────────────
+    init_gold = BigQueryInsertJobOperator(
+        task_id="init_gold_tables",
+        configuration={
+            "query": {
+                "query": "{% include 'sql/gold/init_gold_tables.sql' %}",
+                "useLegacySql": False,
+            }
+        },
+        project_id=PROJECT_ID,
+        location=BQ_LOCATION,
+        deferrable=True,
+    )
+
+    # ── Gold: MERGE/upsert by state ──────────────────────────────────────
     gold_by_state = BigQueryInsertJobOperator(
         task_id="aggregate_gold_by_state",
         configuration={
             "query": {
-                "query": ("{% include 'sql/gold/revoked_providers_by_state.sql' %}"),
+                "query": "{% include 'sql/gold/revoked_providers_by_state.sql' %}",
                 "useLegacySql": False,
-                "destinationTable": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": "gold",
-                    "tableId": "revoked_medicare_providers_by_state",
-                },
-                "writeDisposition": "WRITE_TRUNCATE",
             }
         },
         project_id=PROJECT_ID,
@@ -162,20 +176,13 @@ def cms_revoked_medicare_providers_pipeline():
         deferrable=True,
     )
 
-    # ── Gold: Time-series trends ─────────────────────────────────────────
-    # Expect templated SQL at: sql/gold/revoked_providers_trends.sql
+    # ── Gold: MERGE/upsert trends ────────────────────────────────────────
     gold_trends = BigQueryInsertJobOperator(
         task_id="aggregate_gold_trends",
         configuration={
             "query": {
                 "query": "{% include 'sql/gold/revoked_providers_trends.sql' %}",
                 "useLegacySql": False,
-                "destinationTable": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": "gold",
-                    "tableId": "revoked_medicare_providers_trends",
-                },
-                "writeDisposition": "WRITE_TRUNCATE",
             }
         },
         project_id=PROJECT_ID,
@@ -186,7 +193,7 @@ def cms_revoked_medicare_providers_pipeline():
     # ── Dependencies ─────────────────────────────────────────────────────
     raw_data = extract()
     bronze_done = load_bronze(raw_data)
-    bronze_done >> silver >> [gold_by_state, gold_trends]
+    bronze_done >> init_silver >> silver >> init_gold >> [gold_by_state, gold_trends]
 
 
 cms_revoked_medicare_providers_pipeline()

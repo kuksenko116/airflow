@@ -94,3 +94,25 @@ CREATE TABLE IF NOT EXISTS `{{ var.value.gcp_project_id }}.gold.fact_respiratory
   flu_a_tests           INT64,
   flu_b_tests           INT64
 );
+
+CREATE TABLE IF NOT EXISTS `{{ var.value.gcp_project_id }}.gold.revoked_medicare_providers_by_state` (
+  state_cd                STRING NOT NULL,
+  total_revocations       INT64,
+  active_revocations      INT64,
+  reenrollment_eligible   INT64,
+  distinct_provider_types INT64,
+  most_common_reason      STRING,
+  earliest_revocation     DATE,
+  latest_revocation       DATE,
+  _gold_built_at          TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS `{{ var.value.gcp_project_id }}.gold.revoked_medicare_providers_trends` (
+  revocation_year          INT64  NOT NULL,
+  revocation_reason        STRING NOT NULL,
+  revocation_count         INT64,
+  reenrollment_eligible    INT64,
+  reenrollment_rate        FLOAT64,
+  distinct_states          INT64,
+  _gold_built_at           TIMESTAMP
+);

@@ -3,14 +3,16 @@ CHHS COVID-19 Vaccines by County — Bronze → Silver → Gold pipeline.
 
 Source : https://data.chhs.ca.gov/dataset/vaccine-progress-dashboard
 API    : CKAN datastore_search (no auth required, paginated)
-Schedule: Daily at 07:00 UTC
-Strategy: Full reload (WRITE_TRUNCATE)
+Schedule: Weekly on Monday at 06:00 UTC
+Strategy: Bronze full reload, Silver/Gold MERGE (upsert)
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+
+import time
 
 import requests
 from airflow.decorators import dag, task
@@ -36,7 +38,7 @@ BRONZE_TABLE = f"{PROJECT_ID}.bronze.chhs_covid_vaccines_raw"
     dag_id="chhs_covid_vaccines_pipeline",
     default_args=DEFAULT_ARGS,
     description="Ingest CHHS COVID-19 Vaccines by County into BigQuery (medallion).",
-    schedule="0 7 * * *",  # daily 07:00 UTC
+    schedule="0 6 * * 1",  # every Monday 06:00 UTC
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=["chhs", "covid", "vaccines", "medallion"],
@@ -46,12 +48,17 @@ def chhs_covid_vaccines_pipeline():
     # ── Extract (paginated) ──────────────────────────────────────────────
     @task()
     def extract() -> list[dict]:
-        """Fetch all rows from the COVID-19 Vaccines API with pagination."""
+        """Fetch all rows from the COVID-19 Vaccines API with pagination.
+
+        Uses a session for connection reuse and a delay between pages
+        to avoid being rate-limited by the CHHS CKAN API.
+        """
         all_records: list[dict] = []
         offset = 0
+        session = requests.Session()
 
         while True:
-            resp = requests.get(
+            resp = session.get(
                 API_URL,
                 params={
                     "resource_id": RESOURCE_ID,
@@ -69,7 +76,9 @@ def chhs_covid_vaccines_pipeline():
             if len(records) < PAGE_SIZE:
                 break
             offset += PAGE_SIZE
+            time.sleep(2)  # avoid rate-limiting on pagination
 
+        session.close()
         return all_records
 
     # ── Load Bronze ──────────────────────────────────────────────────────
@@ -98,19 +107,27 @@ def chhs_covid_vaccines_pipeline():
         job.result()
         return f"Loaded {len(rows)} rows into {BRONZE_TABLE}"
 
-    # ── Silver ───────────────────────────────────────────────────────────
+    # ── Silver: Init tables ──────────────────────────────────────────────
+    init_silver = BigQueryInsertJobOperator(
+        task_id="init_silver_tables",
+        configuration={
+            "query": {
+                "query": "{% include 'sql/silver/init_silver_tables.sql' %}",
+                "useLegacySql": False,
+            }
+        },
+        project_id=PROJECT_ID,
+        location=BQ_LOCATION,
+        deferrable=True,
+    )
+
+    # ── Silver: MERGE/upsert ──────────────────────────────────────────────
     silver = BigQueryInsertJobOperator(
         task_id="transform_silver",
         configuration={
             "query": {
                 "query": "{% include 'sql/silver/clean_covid_vaccines.sql' %}",
                 "useLegacySql": False,
-                "destinationTable": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": "silver",
-                    "tableId": "covid_vaccines_by_county",
-                },
-                "writeDisposition": "WRITE_TRUNCATE",
             }
         },
         project_id=PROJECT_ID,
@@ -176,7 +193,7 @@ def chhs_covid_vaccines_pipeline():
     # ── Dependencies ─────────────────────────────────────────────────────
     raw_data = extract()
     bronze_done = load_bronze(raw_data)
-    bronze_done >> silver >> init_gold >> [dim_date, dim_county] >> fact
+    bronze_done >> init_silver >> silver >> init_gold >> [dim_date, dim_county] >> fact
 
 
 chhs_covid_vaccines_pipeline()

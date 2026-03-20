@@ -4,7 +4,7 @@ CHHS Respiratory Virus Dashboard — Bronze → Silver → Gold pipeline.
 Source : https://data.chhs.ca.gov/dataset/respiratory-virus-dashboard
 API    : CKAN datastore_search (no auth required)
 Schedule: Weekly on Monday at 06:00 UTC
-Strategy: Full reload (WRITE_TRUNCATE)
+Strategy: Bronze full reload, Silver/Gold MERGE (upsert)
 """
 
 from __future__ import annotations
@@ -104,19 +104,27 @@ def chhs_respiratory_virus_pipeline():
         job.result()  # block until complete
         return f"Loaded {len(rows)} rows into {BRONZE_TABLE}"
 
-    # ── Silver ───────────────────────────────────────────────────────────
+    # ── Silver: Init tables ──────────────────────────────────────────────
+    init_silver = BigQueryInsertJobOperator(
+        task_id="init_silver_tables",
+        configuration={
+            "query": {
+                "query": "{% include 'sql/silver/init_silver_tables.sql' %}",
+                "useLegacySql": False,
+            }
+        },
+        project_id=PROJECT_ID,
+        location=BQ_LOCATION,
+        deferrable=True,
+    )
+
+    # ── Silver: MERGE/upsert ──────────────────────────────────────────────
     silver = BigQueryInsertJobOperator(
         task_id="transform_silver",
         configuration={
             "query": {
                 "query": "{% include 'sql/silver/clean_respiratory_virus.sql' %}",
                 "useLegacySql": False,
-                "destinationTable": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": "silver",
-                    "tableId": "respiratory_virus",
-                },
-                "writeDisposition": "WRITE_TRUNCATE",
             }
         },
         project_id=PROJECT_ID,
@@ -208,7 +216,7 @@ def chhs_respiratory_virus_pipeline():
     # ── Dependencies ─────────────────────────────────────────────────────
     raw_data = extract()
     bronze_done = load_bronze(raw_data)
-    bronze_done >> silver >> init_gold >> [dim_date, dim_season, dim_region, dim_age_group] >> fact
+    bronze_done >> init_silver >> silver >> init_gold >> [dim_date, dim_season, dim_region, dim_age_group] >> fact
 
 
 chhs_respiratory_virus_pipeline()
